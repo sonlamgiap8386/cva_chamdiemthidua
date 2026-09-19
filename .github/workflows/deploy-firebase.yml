@@ -20,7 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      - run: npm run build
+      - name: Build project
+        run: npx vite build
         env:
           VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
