@@ -1,0 +1,12 @@
+{
+  "projectId": "cva-cham-diem-thi-dua",
+  "appId": "1:18946166372:web:cva_thi_dua_web",
+  "apiKey": "AIzaSyD204MvIswRdIaUF2lH9cAGHzgIF1MloA4",
+  "authDomain": "cva-cham-diem-thi-dua.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "cva-cham-diem-thi-dua.firebasestorage.app",
+  "messagingSenderId": "18946166372",
+  "measurementId": "",
+  "oAuthClientId": "",
+  "recaptchaSiteKey": ""
+}

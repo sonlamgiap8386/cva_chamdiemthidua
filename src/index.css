@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+:root {
+  font-family: "Times New Roman", Times, "Tinos", "Noto Serif", Georgia, serif;
+}
+
+html, body {
+  font-family: "Times New Roman", Times, "Tinos", "Noto Serif", Georgia, serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+/* Ensure all elements, buttons, headings, inputs, tables use Times New Roman without font bugs */
+h1, h2, h3, h4, h5, h6,
+p, span, div, a,
+button, input, select, textarea,
+table, th, td, label {
+  font-family: "Times New Roman", Times, "Tinos", "Noto Serif", Georgia, serif;
+}
+
+.font-sans, .font-serif {
+  font-family: "Times New Roman", Times, "Tinos", "Noto Serif", Georgia, serif !important;
+}
+
+/* Ensure diacritics on uppercase Vietnamese letters (Đ, Ắ, Ậ, Ế, Ồ, Ự) do not get clipped in headers */
+th, h1, h2, h3, h4 {
+  line-height: 1.4;
+  padding-top: 1px;
+}
+

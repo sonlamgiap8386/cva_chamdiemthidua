@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+build-verify/
+.env
+.env.*
+!.env.example
+firebase-debug.log
+*-firebase-adminsdk-*.json

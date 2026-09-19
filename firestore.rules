@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function role() { return signedIn() ? request.auth.token.role : null; }
+    function isAdmin() { return role() == 'bgh'; }
+    function isLeader() { return role() == 'ttcm'; }
+    function staffId() { return request.auth.token.staffId; }
+    function departmentId() { return request.auth.token.departmentId; }
+    function sameDepartment(data) { return isLeader() && departmentId() == data.departmentId; }
+    function validScore(data) {
+      return data.staffId is string
+        && data.departmentId is string
+        && data.month is int && data.month >= 1 && data.month <= 12
+        && data.year is string
+        && data.baseScore is number
+        && data.totalScore is number
+        && data.status in ['draft', 'submitted', 'approved', 'locked'];
+    }
+    function leaderEditableFields() {
+      return ['bonusItems', 'penaltyItems', 'totalBonus', 'totalPenalty', 'totalScore',
+              'status', 'reviewedBy', 'reviewedByName', 'reviewedAt', 'feedback'];
+    }
+
+    // A user can read only their own profile. BGH can manage all profiles; the
+    // client must never be used to provision Auth accounts or custom claims.
+    match /users/{id} {
+      allow get: if signedIn() && (isAdmin() || id == staffId());
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /departments/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /scores/{id} {
+      allow get, list: if signedIn() && (isAdmin() || resource.data.staffId == staffId() || sameDepartment(resource.data));
+      allow create: if isAdmin() || (sameDepartment(request.resource.data)
+        && validScore(request.resource.data)
+        && request.resource.data.status in ['draft', 'submitted']);
+      allow update: if isAdmin() || (
+        sameDepartment(resource.data)
+        && sameDepartment(request.resource.data)
+        && validScore(request.resource.data)
+        && resource.data.status in ['draft', 'submitted']
+        && request.resource.data.status in ['draft', 'submitted']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(leaderEditableFields())
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /system_meta/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+  }
+}

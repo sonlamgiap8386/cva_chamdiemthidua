@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThiDuaCVA Firestore Schema Blueprint",
+  "description": "Database blueprint for CVA High School Staff Evaluation and Thi Dua System",
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Information about teachers, administrators, and staff members",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "code": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "position": { "type": "string" },
+        "isCivilServant": { "type": "boolean" },
+        "avatarUrl": { "type": "string" },
+        "phone": { "type": "string" }
+      },
+      "required": ["id", "name", "code", "role", "departmentId"]
+    },
+    "MonthlyScoreRecord": {
+      "title": "Monthly Score Record",
+      "description": "Detailed thi dua score evaluation record for a staff member in a specific month",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "staffId": { "type": "string" },
+        "staffName": { "type": "string" },
+        "staffCode": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "month": { "type": "number" },
+        "year": { "type": "string" },
+        "baseScore": { "type": "number" },
+        "totalBonus": { "type": "number" },
+        "totalPenalty": { "type": "number" },
+        "totalScore": { "type": "number" },
+        "bghApprovedScore": { "type": "number" },
+        "status": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "staffId", "month", "year", "baseScore", "totalScore", "status"]
+    },
+    "Department": {
+      "title": "Department",
+      "description": "School subject or functional department",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "shortName": { "type": "string" },
+        "headId": { "type": "string" }
+      },
+      "required": ["id", "name", "shortName"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User and teacher directory profiles"
+    },
+    "/scores/{scoreId}": {
+      "schema": { "$ref": "#/entities/MonthlyScoreRecord" },
+      "description": "Individual monthly evaluation scores for teachers"
+    },
+    "/departments/{deptId}": {
+      "schema": { "$ref": "#/entities/Department" },
+      "description": "Academic and administrative departments"
+    }
+  }
+}
