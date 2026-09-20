@@ -16,7 +16,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { CriterionItem, UserProfile } from '../types';
-import { CRITERIA_LIST } from '../data/mockData';
+import { CRITERIA_LIST } from '../data/criteria';
 import { isAdministrator } from '../utils/auth';
 
 interface CriteriaGuideProps {

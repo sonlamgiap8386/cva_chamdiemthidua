@@ -5,6 +5,7 @@ import {
   EmailAuthProvider,
   reauthenticateWithCredential,
   updatePassword,
+  sendPasswordResetEmail,
   getIdTokenResult,
   type User,
   type Unsubscribe,
@@ -13,6 +14,11 @@ import { auth } from './config';
 
 export function signIn(email: string, password: string) {
   return signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
+}
+
+/** Gửi email đặt lại mật khẩu. Firebase không tiết lộ email có tồn tại hay không. */
+export function requestPasswordReset(email: string) {
+  return sendPasswordResetEmail(auth, email.trim().toLowerCase());
 }
 
 export function signOutUser() {

@@ -1,5 +1,5 @@
-import { MonthlyScoreRecord, UserProfile, ScoreItemDetail } from '../types';
-import { SCHOOL_YEAR_MONTHS } from '../utils/academicYear';
+import { MonthlyScoreRecord, UserProfile, ScoreItemDetail } from '../../src/types';
+import { SCHOOL_YEAR_MONTHS } from '../../src/utils/academicYear';
 
 export function generateComprehensiveMonthlyScores(
   users: UserProfile[],

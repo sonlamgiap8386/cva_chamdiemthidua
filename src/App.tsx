@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, lazy, Suspense } from 'react';
 import { Header } from './components/Header';
 import { Sidebar, NavTab } from './components/Sidebar';
 import { DashboardOverview } from './components/DashboardOverview';
@@ -29,9 +29,8 @@ import {
   Department,
   UserRole
 } from './types';
-import {
-  INITIAL_DEPARTMENTS
-} from './data/mockData';
+import { DEPARTMENT_SKELETON } from './data/departments';
+import { SCHOOL_AVATAR, CURRENT_SCHOOL_YEAR, MONTHLY_BASE_SCORE } from './data/constants';
 import {
   loadBackups,
   saveBackups,
@@ -40,10 +39,13 @@ import {
   loadSettings,
   saveSettings,
   createCloudSnapshot,
+  purgeLegacyStorage,
+  MAX_LOCAL_BACKUPS,
   AppSettings
 } from './utils/storage';
 import {
-  testFirebaseConnection,
+  canListStaff,
+  saveStaffBatchToFirestore,
   fetchStaffFromFirestore,
   syncStaffListToFirestore,
   deleteStaffFromFirestore,
@@ -55,23 +57,41 @@ import {
   saveMultipleScoresToFirestore,
   subscribeToScores,
   subscribeToStaff,
-  fetchStaffById
+  subscribeToRankings,
+  publishRankings,
+  fetchStaffById,
+  type DataScope
 } from './firebase/firebaseService';
+import { isOfficialResult } from './utils/rankings';
 import { getAuthorizationClaims, observeAuthState, signOutUser } from './firebase/authService';
 import { SCHOOL_YEAR_MONTHS } from './utils/academicYear';
-import { SCHOOL_AVATAR } from './data/staffData';
+
+/** Chuyển lỗi Firebase kỹ thuật thành thông báo người dùng hiểu được. */
+function describeFirebaseError(err: unknown): string {
+  const code = (err as { code?: string })?.code ?? '';
+  if (code === 'permission-denied') return 'Bạn không có quyền thực hiện thao tác này, hoặc dữ liệu đã được khóa/duyệt.';
+  if (code === 'unavailable' || code === 'network-request-failed') return 'Mất kết nối tới máy chủ. Vui lòng kiểm tra mạng và thử lại.';
+  if (code === 'failed-precondition') return 'Truy vấn cần chỉ mục Firestore. Quản trị viên vui lòng xem console trình duyệt để tạo chỉ mục.';
+  return (err as { message?: string })?.message || 'Lỗi không xác định.';
+}
+
+type Banner = { kind: 'error' | 'info'; text: string };
 
 export default function App() {
   // Application state
   const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
-  const [departments, setDepartments] = useState<Department[]>(INITIAL_DEPARTMENTS);
+  const [departments, setDepartments] = useState<Department[]>(DEPARTMENT_SKELETON);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [authNotice, setAuthNotice] = useState('');
+  const [banner, setBanner] = useState<Banner | null>(null);
   const [currentTab, setCurrentTab] = useState<NavTab>('overview');
   const [currentMonth, setCurrentMonth] = useState<number>(9);
 
   // Persistent data state
   const [scores, setScores] = useState<MonthlyScoreRecord[]>([]);
+  // Bảng xếp hạng công khai (kết quả đã duyệt) dành cho tài khoản không phải BGH.
+  const [publicRankings, setPublicRankings] = useState<MonthlyScoreRecord[]>([]);
   const [backups, setBackups] = useState<CloudBackup[]>(() => loadBackups());
   const [notifications, setNotifications] = useState<AppNotification[]>(() => loadNotifications());
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
@@ -103,7 +123,25 @@ export default function App() {
   const handleLogout = async () => {
     await signOutUser();
     setCurrentUser(null);
+    // Xóa dữ liệu điểm/nhân sự khỏi bộ nhớ khi đăng xuất (máy dùng chung trong phòng hội đồng).
+    setScores([]);
+    setAllUsers([]);
+    setBanner(null);
   };
+
+  const reportSaveError = useCallback((action: string, err: unknown) => {
+    console.error(`Lỗi khi ${action}:`, err);
+    setBanner({ kind: 'error', text: `Không thể ${action}: ${describeFirebaseError(err)}` });
+  }, []);
+
+  useEffect(() => { purgeLegacyStorage(); }, []);
+
+  // Công bố lại bảng xếp hạng công khai cho các tháng bị ảnh hưởng (chỉ BGH được ghi).
+  const republishRankings = useCallback((nextScores: MonthlyScoreRecord[], months: number[]) => {
+    if (currentUser?.role !== 'bgh' || months.length === 0) return;
+    publishRankings(nextScores, CURRENT_SCHOOL_YEAR, months)
+      .catch(err => reportSaveError('công bố bảng xếp hạng (dùng nút Đồng bộ để công bố lại)', err));
+  }, [currentUser?.role, reportSaveError]);
 
   useEffect(() => observeAuthState(async firebaseUser => {
     if (!firebaseUser) {
@@ -113,13 +151,20 @@ export default function App() {
     }
     try {
       const claims = await getAuthorizationClaims(firebaseUser);
-      if (!claims.staffId || !claims.role) throw new Error('Tài khoản chưa được cấp quyền truy cập.');
+      if (!claims.staffId || !claims.role) throw new Error('Tài khoản chưa được cấp quyền truy cập. Vui lòng liên hệ Quản trị viên.');
       const profile = await fetchStaffById(claims.staffId);
-      if (!profile || profile.role !== claims.role || (claims.role === 'ttcm' && profile.departmentId !== claims.departmentId)) {
-        throw new Error('Hồ sơ và quyền Firebase không khớp.');
+      if (!profile) throw new Error('Không tìm thấy hồ sơ cán bộ của tài khoản này. Vui lòng liên hệ Quản trị viên.');
+      if (profile.role !== claims.role || (claims.role === 'ttcm' && profile.departmentId !== claims.departmentId)) {
+        throw new Error('Quyền của tài khoản đang được cập nhật. Vui lòng liên hệ Quản trị viên để đồng bộ quyền (npm run sync:claims) rồi đăng nhập lại.');
       }
+      setAuthNotice('');
       setCurrentUser(profile);
-    } catch {
+    } catch (err) {
+      setAuthNotice(
+        (err as { code?: string })?.code
+          ? describeFirebaseError(err)
+          : err instanceof Error ? err.message : 'Không thể xác thực tài khoản.'
+      );
       await signOutUser();
       setCurrentUser(null);
     } finally {
@@ -163,7 +208,7 @@ export default function App() {
     setIsBackingUp(true);
     setTimeout(() => {
       const newBackup = createCloudSnapshot(snapshotScores, isAuto, desc);
-      setBackups(prev => [newBackup, ...prev]);
+      setBackups(prev => [newBackup, ...prev].slice(0, MAX_LOCAL_BACKUPS));
       setSettings(prev => ({
         ...prev,
         lastBackupAt: newBackup.createdAt
@@ -179,7 +224,8 @@ export default function App() {
       await Promise.all([
         syncStaffListToFirestore(allUsers),
         syncScoresToFirestore(scores),
-        syncDepartmentsToFirestore(departments)
+        syncDepartmentsToFirestore(departments),
+        publishRankings(scores, CURRENT_SCHOOL_YEAR, SCHOOL_YEAR_MONTHS)
       ]);
       setFirebaseStatus(prev => ({
         ...prev,
@@ -229,83 +275,95 @@ export default function App() {
     }
   }, []);
 
-  // Initialize Firebase connection only after an authenticated session is available.
+  // Kết nối Firestore sau khi đã đăng nhập. Mỗi vai trò chỉ đăng ký nghe đúng phạm vi dữ liệu
+  // mà firestore.rules cho phép; onSnapshot đã trả dữ liệu ban đầu nên không cần đọc trước.
+  const userId = currentUser?.id;
+  const userRole = currentUser?.role;
+  const userDepartmentId = currentUser?.departmentId;
+
   useEffect(() => {
-    if (!authReady || !currentUser) return;
-    let unsubScores: (() => void) | null = null;
-    let unsubStaff: (() => void) | null = null;
+    if (!authReady || !userId || !userRole) return;
+    const scope: DataScope = {
+      role: userRole,
+      staffId: userId,
+      departmentId: userDepartmentId,
+      year: CURRENT_SCHOOL_YEAR,
+    };
+    let cancelled = false;
+    let scoresReady = false;
+    let staffReady = !canListStaff(scope);
+    const unsubscribers: Array<() => void> = [];
 
-    async function initFirebase() {
-      setFirebaseStatus(prev => ({ ...prev, isSyncing: true }));
-      try {
-        const isOnline = await testFirebaseConnection();
-        if (!isOnline) {
-          throw new Error('Firebase đang ngoại tuyến');
-        }
+    setFirebaseStatus(prev => ({ ...prev, isSyncing: true, error: null }));
 
-        // 1. Fetch Staff
-        const cloudUsers = await fetchStaffFromFirestore();
-        if (cloudUsers.length > 0) {
-          setAllUsers(cloudUsers);
-        }
-
-        // 2. Fetch Scores
-        const cloudScores = await fetchScoresFromFirestore();
-        if (cloudScores.length > 0) {
-          setScores(cloudScores);
-        }
-
-        setFirebaseStatus({
-          connected: true,
-          isSyncing: false,
-          lastSyncedAt: new Date(),
-          error: null,
-          teachersCount: cloudUsers.length > 0 ? cloudUsers.length : allUsers.length,
-          scoresCount: cloudScores.length > 0 ? cloudScores.length : scores.length,
-        });
-
-        // 3. Realtime Listener for Scores
-        unsubScores = subscribeToScores((realtimeScores) => {
-          if (realtimeScores && realtimeScores.length > 0) {
-            setScores(realtimeScores);
-            setFirebaseStatus(prev => ({
-              ...prev,
-              lastSyncedAt: new Date(),
-              scoresCount: realtimeScores.length
-            }));
-          }
-        });
-
-        // 4. Realtime Listener for Staff
-        unsubStaff = subscribeToStaff((realtimeStaff) => {
-          if (realtimeStaff && realtimeStaff.length > 0) {
-            setAllUsers(realtimeStaff);
-            setFirebaseStatus(prev => ({
-              ...prev,
-              lastSyncedAt: new Date(),
-              teachersCount: realtimeStaff.length
-            }));
-          }
-        });
-
-      } catch (err: any) {
-        console.warn('Firebase initial sync warning (offline fallback active):', err);
-        setFirebaseStatus(prev => ({
-          ...prev,
-          connected: false,
-          isSyncing: false,
-          error: err?.message || 'Không thể kết nối trực tiếp đến Firebase'
-        }));
+    const markReady = () => {
+      if (scoresReady && staffReady) {
+        setFirebaseStatus(prev => ({ ...prev, connected: true, isSyncing: false, lastSyncedAt: new Date(), error: null }));
       }
+    };
+    const fail = (err: Error) => {
+      if (cancelled) return;
+      setFirebaseStatus(prev => ({ ...prev, connected: false, isSyncing: false, error: describeFirebaseError(err) }));
+    };
+
+    unsubscribers.push(subscribeToScores(scope, records => {
+      if (cancelled) return;
+      setScores(records);
+      scoresReady = true;
+      setFirebaseStatus(prev => ({ ...prev, scoresCount: records.length }));
+      markReady();
+    }, fail));
+
+    if (canListStaff(scope)) {
+      unsubscribers.push(subscribeToStaff(scope, staff => {
+        if (cancelled) return;
+        setAllUsers(staff);
+        staffReady = true;
+        setFirebaseStatus(prev => ({ ...prev, teachersCount: staff.length }));
+        markReady();
+      }, fail));
+    } else {
+      // Giáo viên thường chỉ được đọc hồ sơ của chính mình.
+      const self = currentUser;
+      if (self) setAllUsers([self]);
     }
 
-    initFirebase();
+    fetchDepartmentsFromFirestore()
+      .then(cloudDepartments => { if (!cancelled && cloudDepartments.length > 0) setDepartments(cloudDepartments); })
+      .catch(err => console.warn('Không tải được danh sách tổ chuyên môn:', err));
 
     return () => {
-      if (unsubScores) unsubScores();
-      if (unsubStaff) unsubStaff();
+      cancelled = true;
+      unsubscribers.forEach(unsubscribe => unsubscribe());
     };
-  }, [authReady, currentUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady, userId, userRole, userDepartmentId]);
+
+  // Tài khoản không phải BGH không đọc được điểm của người khác nên xem xếp hạng qua bản công khai.
+  useEffect(() => {
+    if (!authReady || !userId || !userRole || userRole === 'bgh') return;
+    const unsubscribe = subscribeToRankings(
+      CURRENT_SCHOOL_YEAR,
+      setPublicRankings,
+      err => setBanner({ kind: 'error', text: `Không tải được bảng xếp hạng: ${describeFirebaseError(err)}` })
+    );
+    return () => { unsubscribe(); setPublicRankings([]); };
+  }, [authReady, userId, userRole]);
+
+  // Số thành viên / tổ trưởng chỉ tính lại được khi có đủ danh sách (BGH); vai trò khác giữ số liệu từ Firestore.
+  const departmentsView = useMemo(() => {
+    if (userRole !== 'bgh') return departments;
+    return departments.map(dept => {
+      const members = allUsers.filter(u => u.departmentId === dept.id);
+      const leader = members.find(u => u.role === 'ttcm');
+      return {
+        ...dept,
+        leaderId: leader?.id ?? dept.leaderId,
+        leaderName: leader?.name ?? dept.leaderName,
+        memberCount: members.length,
+      };
+    });
+  }, [departments, allUsers, userRole]);
 
   // Restore from Cloud Backup
   const handleRestoreBackup = (backup: CloudBackup) => {
@@ -349,7 +407,7 @@ export default function App() {
     if (isNew) {
       // Auto-generate score records for all 9 months for the new staff member
       const newMonthlyRecords: MonthlyScoreRecord[] = SCHOOL_YEAR_MONTHS.map(month => ({
-        id: `score-${staff.id}-${month}-2026-2027`,
+        id: `score-${staff.id}-${month}-${CURRENT_SCHOOL_YEAR}`,
         staffId: staff.id,
         staffName: staff.name,
         staffCode: staff.code,
@@ -357,13 +415,13 @@ export default function App() {
         departmentName: staff.departmentName,
         position: staff.position,
         month,
-        year: '2026-2027',
-        baseScore: 230,
+        year: CURRENT_SCHOOL_YEAR,
+        baseScore: MONTHLY_BASE_SCORE,
         bonusItems: [],
         penaltyItems: [],
         totalBonus: 0,
         totalPenalty: 0,
-        totalScore: 230,
+        totalScore: MONTHLY_BASE_SCORE,
         status: 'draft'
       }));
 
@@ -371,16 +429,12 @@ export default function App() {
       setScores(updatedScores);
 
       try {
-        await syncStaffListToFirestore(updatedUsers);
+        await saveStaffBatchToFirestore([canonicalStaff]);
         await saveMultipleScoresToFirestore(newMonthlyRecords);
-        setFirebaseStatus(prev => ({
-          ...prev,
-          lastSyncedAt: new Date(),
-          teachersCount: updatedUsers.length,
-          scoresCount: updatedScores.length
-        }));
+        setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() }));
+        setBanner({ kind: 'info', text: `Đã thêm ${canonicalStaff.name}. Để người này đăng nhập được, quản trị viên cần cấp tài khoản: chạy "npm run reset:passwords -- --missing-only" (xem docs/DEPLOYMENT.md).` });
       } catch (err) {
-        console.warn('Firestore new staff sync warning:', err);
+        reportSaveError('lưu hồ sơ cán bộ mới', err);
       }
     } else {
       // Update staff details in existing monthly scores
@@ -400,14 +454,15 @@ export default function App() {
       setScores(updatedScores);
 
       try {
-        await syncStaffListToFirestore(updatedUsers);
+        await saveStaffBatchToFirestore([canonicalStaff]);
         const affectedScores = updatedScores.filter(s => s.staffId === staff.id);
         if (affectedScores.length > 0) {
           await saveMultipleScoresToFirestore(affectedScores);
+          republishRankings(updatedScores, affectedScores.filter(isOfficialResult).map(s => s.month));
         }
         setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() }));
       } catch (err) {
-        console.warn('Firestore update staff sync warning:', err);
+        reportSaveError('cập nhật hồ sơ cán bộ', err);
       }
     }
   };
@@ -421,15 +476,11 @@ export default function App() {
 
     try {
       await deleteStaffFromFirestore(staffId);
-      await syncStaffListToFirestore(updatedUsers);
-      setFirebaseStatus(prev => ({
-        ...prev,
-        lastSyncedAt: new Date(),
-        teachersCount: updatedUsers.length,
-        scoresCount: updatedScores.length
-      }));
+      republishRankings(updatedScores, scores.filter(s => s.staffId === staffId && isOfficialResult(s)).map(s => s.month));
+      setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() }));
+      setBanner({ kind: 'info', text: 'Đã xóa hồ sơ và điểm của cán bộ. Nếu người này đã có tài khoản đăng nhập, hãy vô hiệu hóa trong Firebase Console → Authentication.' });
     } catch (err) {
-      console.warn('Firestore delete staff warning:', err);
+      reportSaveError('xóa cán bộ', err);
     }
   };
 
@@ -437,16 +488,19 @@ export default function App() {
     const existingCodeMap = new Map(allUsers.map(u => [u.code, u]));
     const finalUsers = [...allUsers];
     const newStaffMembers: UserProfile[] = [];
+    const changedStaff: UserProfile[] = [];
 
     importedStaffList.forEach(item => {
       if (existingCodeMap.has(item.code)) {
         const idx = finalUsers.findIndex(u => u.code === item.code);
         if (idx !== -1) {
           finalUsers[idx] = { ...finalUsers[idx], ...item };
+          changedStaff.push(finalUsers[idx]);
         }
       } else {
         finalUsers.push(item);
         newStaffMembers.push(item);
+        changedStaff.push(item);
       }
     });
 
@@ -461,7 +515,7 @@ export default function App() {
         const exists = updatedScores.some(s => s.staffId === staff.id && s.month === month);
         if (!exists) {
           newScoreRecords.push({
-            id: `score-${staff.id}-${month}-2026-2027`,
+            id: `score-${staff.id}-${month}-${CURRENT_SCHOOL_YEAR}`,
             staffId: staff.id,
             staffName: staff.name,
             staffCode: staff.code,
@@ -469,13 +523,13 @@ export default function App() {
             departmentName: staff.departmentName,
             position: staff.position,
             month,
-            year: '2026-2027',
-            baseScore: 230,
+            year: CURRENT_SCHOOL_YEAR,
+            baseScore: MONTHLY_BASE_SCORE,
             bonusItems: [],
             penaltyItems: [],
             totalBonus: 0,
             totalPenalty: 0,
-            totalScore: 230,
+            totalScore: MONTHLY_BASE_SCORE,
             status: 'draft'
           });
         }
@@ -488,18 +542,16 @@ export default function App() {
     }
 
     try {
-      await syncStaffListToFirestore(finalUsers);
+      await saveStaffBatchToFirestore(changedStaff);
       if (newScoreRecords.length > 0) {
         await saveMultipleScoresToFirestore(newScoreRecords);
       }
-      setFirebaseStatus(prev => ({
-        ...prev,
-        lastSyncedAt: new Date(),
-        teachersCount: finalUsers.length,
-        scoresCount: updatedScores.length
-      }));
+      setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() }));
+      if (newStaffMembers.length > 0) {
+        setBanner({ kind: 'info', text: `Đã nhập ${newStaffMembers.length} cán bộ mới. Cần cấp tài khoản đăng nhập: chạy "npm run reset:passwords -- --missing-only" (xem docs/DEPLOYMENT.md).` });
+      }
     } catch (err) {
-      console.warn('Firestore batch import staff warning:', err);
+      reportSaveError('nhập danh sách cán bộ', err);
     }
   };
 
@@ -580,32 +632,32 @@ export default function App() {
     };
     setNotifications(prev => [notif, ...prev]);
 
-    // 5. Sync to Firebase Firestore
+    // 5. Chỉ ghi những hồ sơ thực sự thay đổi (không ghi lại cả danh sách)
     try {
+      const originalUsers = new Set(allUsers);
+      const changedUsers = updatedUsers.filter(u => !originalUsers.has(u));
       await Promise.all([
-        syncStaffListToFirestore(updatedUsers),
+        saveStaffBatchToFirestore(changedUsers),
         syncDepartmentsToFirestore(updatedDepartments)
       ]);
-      setFirebaseStatus(prev => ({
-        ...prev,
-        lastSyncedAt: new Date(),
-        teachersCount: updatedUsers.length
-      }));
+      setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() }));
+      setBanner({ kind: 'info', text: 'Đã lưu phân công Tổ trưởng. Quyền đăng nhập dựa trên Firebase custom claims nên quản trị viên cần chạy "npm run sync:claims" để có hiệu lực (xem docs/DEPLOYMENT.md).' });
     } catch (err) {
-      console.warn('Firestore sync departments/staff leaders warning:', err);
+      reportSaveError('lưu phân công Tổ trưởng', err);
     }
   };
 
   // Save individual score record with Firebase sync
   const handleSaveScoreRecord = (updatedRecord: MonthlyScoreRecord) => {
     setScores(prev => prev.map(s => (s.id === updatedRecord.id ? updatedRecord : s)));
+    republishRankings(scores.map(s => (s.id === updatedRecord.id ? updatedRecord : s)), [updatedRecord.month]);
 
     // Sync directly to Firebase Firestore
     saveSingleScoreToFirestore(updatedRecord)
       .then(() => {
         setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() }));
       })
-      .catch(err => console.warn('Could not save to Firestore immediately:', err));
+      .catch(err => reportSaveError('lưu điểm', err));
 
     // Create system notification
     const isApproved = updatedRecord.status === 'approved';
@@ -645,10 +697,11 @@ export default function App() {
       approvedAt: new Date().toLocaleString('vi-VN')
     };
     setScores(prev => prev.map(s => (s.id === recordId ? updatedRecord : s)));
+    republishRankings(scores.map(s => (s.id === recordId ? updatedRecord : s)), [updatedRecord.month]);
 
     saveSingleScoreToFirestore(updatedRecord)
       .then(() => setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() })))
-      .catch(err => console.warn('Firestore single approve error:', err));
+      .catch(err => reportSaveError('duyệt hồ sơ', err));
   };
 
   // BGH Approve All submitted records for the month with Firebase sync
@@ -656,7 +709,7 @@ export default function App() {
     if (!currentUser) return;
     const approvedAt = new Date().toLocaleString('vi-VN');
     const updatedRecords = scores
-      .filter(s => s.month === month && s.status !== 'approved')
+      .filter(s => s.month === month && s.status === 'submitted')
       .map(s => ({
         ...s,
         status: 'approved' as const,
@@ -673,7 +726,8 @@ export default function App() {
     if (updatedRecords.length > 0) {
       saveMultipleScoresToFirestore(updatedRecords)
         .then(() => setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() })))
-        .catch(err => console.warn('Firestore batch approve error:', err));
+        .catch(err => reportSaveError('duyệt toàn bộ hồ sơ', err));
+      republishRankings(scores.map(s => updatedById.get(s.id) ?? s), [month]);
     }
 
     const notif: AppNotification = {
@@ -700,7 +754,7 @@ export default function App() {
     if (!currentUser) return;
     const reviewedAt = new Date().toLocaleString('vi-VN');
     const updatedRecords = scores
-      .filter(s => s.month === month && s.departmentId === departmentId && s.status !== 'approved')
+      .filter(s => s.month === month && s.departmentId === departmentId && (s.status === 'draft' || s.status === 'submitted'))
       .map(s => ({
         ...s,
         status: 'submitted' as const,
@@ -715,7 +769,7 @@ export default function App() {
     if (updatedRecords.length > 0) {
       saveMultipleScoresToFirestore(updatedRecords)
         .then(() => setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() })))
-        .catch(err => console.warn('Firestore batch submit error:', err));
+        .catch(err => reportSaveError('nộp bảng điểm', err));
     }
 
     const notif: AppNotification = {
@@ -742,7 +796,8 @@ export default function App() {
     if (lockedRecords.length > 0) {
       saveMultipleScoresToFirestore(lockedRecords)
         .then(() => setFirebaseStatus(prev => ({ ...prev, lastSyncedAt: new Date() })))
-        .catch(err => console.warn('Firestore lock month error:', err));
+        .catch(err => reportSaveError('khóa sổ tháng', err));
+      republishRankings(scores.map(s => lockedById.get(s.id) ?? s), [month]);
     }
 
     handlePerformBackup(
@@ -785,9 +840,7 @@ export default function App() {
   if (!currentUser) {
     return (
       <Suspense fallback={<LoadingView />}>
-        <LoginPage
-          allUsers={allUsers}
-        />
+        <LoginPage notice={authNotice} />
       </Suspense>
     );
   }
@@ -818,13 +871,40 @@ export default function App() {
           onToggleMobileMenu={() => setIsMobileMenuOpen(true)}
           firebaseConnected={firebaseStatus.connected}
           firebaseSyncing={firebaseStatus.isSyncing}
-          onSyncFirebase={handleSyncAllToFirebase}
+          onSyncFirebase={currentUser.role === 'bgh'
+            ? () => { handleSyncAllToFirebase().catch(err => reportSaveError('đồng bộ dữ liệu lên Firebase', err)); }
+            : () => {}}
           onOpenChangePassword={() => setIsChangePasswordOpen(true)}
           onLogout={handleLogout}
         />
 
         {/* Content Body */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          {banner && (
+            <div
+              role={banner.kind === 'error' ? 'alert' : 'status'}
+              className={`mb-4 flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-sm ${
+                banner.kind === 'error'
+                  ? 'border-rose-500/50 bg-rose-950/60 text-rose-200'
+                  : 'border-amber-500/40 bg-amber-950/40 text-amber-200'
+              }`}
+            >
+              <span>{banner.text}</span>
+              <button
+                type="button"
+                onClick={() => setBanner(null)}
+                className="shrink-0 rounded px-2 text-xs font-bold hover:bg-white/10 cursor-pointer"
+                aria-label="Đóng thông báo"
+              >
+                Đóng
+              </button>
+            </div>
+          )}
+          {firebaseStatus.error && !firebaseStatus.connected && (
+            <div role="alert" className="mb-4 rounded-xl border border-rose-500/50 bg-rose-950/60 px-4 py-3 text-sm text-rose-200">
+              Không tải được dữ liệu từ máy chủ: {firebaseStatus.error}
+            </div>
+          )}
           <Suspense fallback={<LoadingView />}>
           {currentTab === 'overview' && (
             <DashboardOverview
@@ -843,7 +923,7 @@ export default function App() {
               currentMonth={currentMonth}
               onChangeMonth={setCurrentMonth}
               currentUser={currentUser}
-              departments={departments}
+              departments={departmentsView}
               onSelectRecordToScore={record => setSelectedRecordToScore(record)}
               onApproveRecord={handleApproveRecord}
               onApproveAll={handleApproveAll}
@@ -852,19 +932,24 @@ export default function App() {
             />
           )}
 
+          {currentTab === 'leaderboard' && currentUser.role !== 'bgh' && (
+            <div role="note" className="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
+              Bảng xếp hạng công khai toàn trường, hiển thị kết quả đã được Ban Giám Hiệu duyệt hoặc khóa sổ.
+            </div>
+          )}
           {currentTab === 'leaderboard' && (
             <RealTimeLeaderboard
-              scores={scores}
+              scores={currentUser.role === 'bgh' ? scores : publicRankings}
               currentMonth={currentMonth}
               currentUser={currentUser}
-              departments={departments}
+              departments={departmentsView}
             />
           )}
 
           {currentTab === 'staff' && (
             <StaffDirectory
               users={allUsers}
-              departments={departments}
+              departments={departmentsView}
               scores={scores}
               currentMonth={currentMonth}
               currentUser={currentUser}
@@ -884,7 +969,7 @@ export default function App() {
             <ReportsView
               scores={scores}
               currentMonth={currentMonth}
-              departments={departments}
+              departments={departmentsView}
             />
           )}
 

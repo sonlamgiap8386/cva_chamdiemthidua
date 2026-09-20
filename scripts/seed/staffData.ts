@@ -1,4 +1,4 @@
-import { UserProfile, Department, MonthlyScoreRecord, UserRole } from '../types';
+import { UserProfile, Department, MonthlyScoreRecord, UserRole } from '../../src/types';
 
 export interface RawStaffItem {
   stt: number;

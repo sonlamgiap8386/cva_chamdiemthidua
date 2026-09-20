@@ -8,15 +8,27 @@ import {
   Eye,
   EyeOff
 } from 'lucide-react';
-import { signIn } from '../firebase/authService';
+import { signIn, requestPasswordReset } from '../firebase/authService';
 
-interface LoginPageProps {}
+interface LoginPageProps {
+  /** Lý do phiên đăng nhập bị từ chối sau khi xác thực (thiếu quyền, hồ sơ không khớp...). */
+  notice?: string;
+}
 
-export const LoginPage: React.FC<LoginPageProps> = () => {
+function describeLoginError(err: unknown): string {
+  const code = (err as { code?: string })?.code ?? '';
+  if (code === 'auth/too-many-requests') return 'Đăng nhập sai quá nhiều lần. Vui lòng đợi vài phút rồi thử lại, hoặc dùng "Quên mật khẩu".';
+  if (code === 'auth/network-request-failed') return 'Không kết nối được máy chủ. Vui lòng kiểm tra mạng.';
+  if (code === 'auth/user-disabled') return 'Tài khoản đã bị vô hiệu hóa. Vui lòng liên hệ Quản trị viên.';
+  return 'Email hoặc mật khẩu không chính xác. Nếu quên mật khẩu, hãy dùng "Quên mật khẩu" hoặc liên hệ Quản trị viên.';
+}
+
+export const LoginPage: React.FC<LoginPageProps> = ({ notice }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [infoMsg, setInfoMsg] = useState('');
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,9 +41,29 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
     }
     try {
       await signIn(normalizedEmail, password);
-    } catch {
-      setErrorMsg('Mật khẩu không chính xác. Nếu đã đổi mật khẩu, vui lòng nhập mật khẩu mới hoặc liên hệ Quản trị viên để đặt lại.');
+    } catch (err) {
+      setErrorMsg(describeLoginError(err));
     }
+  };
+
+  const handleForgotPassword = async () => {
+    setErrorMsg('');
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
+      setErrorMsg('Nhập email công vụ vào ô Email rồi bấm "Quên mật khẩu".');
+      return;
+    }
+    try {
+      await requestPasswordReset(normalizedEmail);
+    } catch (err) {
+      const code = (err as { code?: string })?.code ?? '';
+      if (code === 'auth/network-request-failed' || code === 'auth/too-many-requests') {
+        setErrorMsg(describeLoginError(err));
+        return;
+      }
+    }
+    // Luôn báo giống nhau để không lộ email nào có tài khoản.
+    setInfoMsg('Nếu email tồn tại trong hệ thống, hướng dẫn đặt lại mật khẩu đã được gửi. Hãy kiểm tra hộp thư (cả mục Spam).');
   };
 
   return (
@@ -93,10 +125,16 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
               </p>
             </div>
 
-            {errorMsg && (
-              <div className="mb-4 p-3 rounded-xl bg-[#3b0d18] border border-[#7a1830] text-rose-200 flex items-center gap-2 text-xs font-semibold">
+            {(errorMsg || notice) && (
+              <div role="alert" className="mb-4 p-3 rounded-xl bg-[#3b0d18] border border-[#7a1830] text-rose-200 flex items-center gap-2 text-xs font-semibold">
                 <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-                <span>{errorMsg}</span>
+                <span>{errorMsg || notice}</span>
+              </div>
+            )}
+            {infoMsg && !errorMsg && (
+              <div role="status" className="mb-4 p-3 rounded-xl bg-[#0b3a2c] border border-[#166a53] text-emerald-200 flex items-center gap-2 text-xs font-semibold">
+                <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-400" />
+                <span>{infoMsg}</span>
               </div>
             )}
 
@@ -109,7 +147,8 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
                 <div className="relative">
                   <User className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-emerald-400/60" />
                   <input
-                    type="text"
+                    type="email"
+                    autoComplete="username"
                     required
                     value={email}
                     onChange={e => setEmail(e.target.value)}
@@ -127,6 +166,7 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
                   <Lock className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-emerald-400/60" />
                   <input
                     type={showPassword ? 'text' : 'password'}
+                    autoComplete="current-password"
                     required
                     value={password}
                     onChange={e => setPassword(e.target.value)}
@@ -141,8 +181,15 @@ export const LoginPage: React.FC<LoginPageProps> = () => {
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
-                <div className="text-[10px] text-stone-400 mt-1">
-                  Mật khẩu mặc định được cấp chung cho toàn bộ CB/GV
+                <div className="flex items-center justify-between text-[10px] text-stone-400 mt-1">
+                  <span>Lần đầu đăng nhập, hãy đổi mật khẩu cá nhân trong menu tài khoản.</span>
+                  <button
+                    type="button"
+                    onClick={handleForgotPassword}
+                    className="ml-2 shrink-0 font-bold text-amber-300 hover:text-amber-200 underline cursor-pointer"
+                  >
+                    Quên mật khẩu?
+                  </button>
                 </div>
               </div>
 

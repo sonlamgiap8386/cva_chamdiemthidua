@@ -1,20 +1,31 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ---- Danh tính & vai trò: chỉ tin custom claims do quản trị cấp (không tin dữ liệu từ trình duyệt).
+    // Dùng get(..., null) để tài khoản chưa có claims bị từ chối êm thay vì gây lỗi đánh giá luật.
     function signedIn() { return request.auth != null; }
-    function role() { return signedIn() ? request.auth.token.role : null; }
-    function isAdmin() { return role() == 'bgh'; }
-    function isLeader() { return role() == 'ttcm'; }
-    function staffId() { return request.auth.token.staffId; }
-    function departmentId() { return request.auth.token.departmentId; }
-    function sameDepartment(data) { return isLeader() && departmentId() == data.departmentId; }
+    function claim(name) { return signedIn() ? request.auth.token.get(name, null) : null; }
+    function isAdmin() { return claim('role') == 'bgh'; }
+    function isLeader() { return claim('role') == 'ttcm'; }
+    function staffId() { return claim('staffId'); }
+    function departmentId() { return claim('departmentId'); }
+    function hasRole() { return claim('role') in ['bgh', 'ttcm', 'btd', 'gv']; }
+    function sameDepartment(data) {
+      return isLeader() && departmentId() != null && departmentId() == data.departmentId;
+    }
+
+    // ---- Kiểm tra dữ liệu điểm: tổng điểm phải khớp cấu phần, tránh sửa số liệu ngoài giao diện.
     function validScore(data) {
       return data.staffId is string
         && data.departmentId is string
         && data.month is int && data.month >= 1 && data.month <= 12
         && data.year is string
         && data.baseScore is number
+        && data.totalBonus is number && data.totalBonus >= 0
+        && data.totalPenalty is number && data.totalPenalty >= 0
         && data.totalScore is number
+        && math.abs(data.totalScore - (data.baseScore + data.totalBonus - data.totalPenalty)) < 0.01
         && data.status in ['draft', 'submitted', 'approved', 'locked'];
     }
     function leaderEditableFields() {
@@ -22,11 +33,12 @@ service cloud.firestore {
               'status', 'reviewedBy', 'reviewedByName', 'reviewedAt', 'feedback'];
     }
 
-    // A user can read only their own profile. BGH can manage all profiles; the
-    // client must never be used to provision Auth accounts or custom claims.
+    // Hồ sơ cán bộ: BGH quản lý tất cả; Tổ trưởng đọc được hồ sơ tổ mình (truy vấn phải có
+    // where('departmentId', '==', <tổ của mình>)); mọi người đọc được hồ sơ của chính mình.
+    // Tài khoản Auth và custom claims chỉ do quản trị cấp bằng script, không qua trình duyệt.
     match /users/{id} {
-      allow get: if signedIn() && (isAdmin() || id == staffId());
-      allow list: if isAdmin();
+      allow get: if signedIn() && (isAdmin() || id == staffId() || sameDepartment(resource.data));
+      allow list: if signedIn() && (isAdmin() || sameDepartment(resource.data));
       allow create, update, delete: if isAdmin();
     }
 
@@ -36,10 +48,14 @@ service cloud.firestore {
     }
 
     match /scores/{id} {
+      // Truy vấn của Tổ trưởng phải lọc theo departmentId, của giáo viên phải lọc theo staffId.
       allow get, list: if signedIn() && (isAdmin() || resource.data.staffId == staffId() || sameDepartment(resource.data));
-      allow create: if isAdmin() || (sameDepartment(request.resource.data)
-        && validScore(request.resource.data)
-        && request.resource.data.status in ['draft', 'submitted']);
+
+      // Bản ghi điểm chỉ được tạo/xóa bởi BGH (khi thêm/xóa cán bộ).
+      allow create, delete: if isAdmin();
+
+      // Tổ trưởng chỉ sửa điểm thành viên tổ mình khi chưa duyệt/khóa, không được đổi
+      // định danh (staffId, departmentId, month, year, baseScore) và không được duyệt/khóa.
       allow update: if isAdmin() || (
         sameDepartment(resource.data)
         && sameDepartment(request.resource.data)
@@ -48,12 +64,17 @@ service cloud.firestore {
         && request.resource.data.status in ['draft', 'submitted']
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(leaderEditableFields())
       );
-      allow delete: if isAdmin();
+    }
+
+    // Bảng xếp hạng công khai: mọi tài khoản đã được cấp quyền đều đọc được; chỉ BGH công bố.
+    // Tài liệu chỉ chứa điểm chốt và tổng cộng/trừ của kết quả đã duyệt, không có chi tiết từng mục.
+    match /rankings/{docId} {
+      allow read: if signedIn() && hasRole();
+      allow write: if isAdmin();
     }
 
     match /system_meta/{docId} {
-      allow read: if isAdmin();
-      allow write: if isAdmin();
+      allow read, write: if isAdmin();
     }
   }
 }

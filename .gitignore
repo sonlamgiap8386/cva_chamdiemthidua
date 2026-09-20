@@ -7,3 +7,7 @@ build-verify/
 !.env.example
 firebase-debug.log
 *-firebase-adminsdk-*.json
+
+# Khóa dịch vụ Firebase Admin - TUYỆT ĐỐI không commit
+service-account*.json
+*serviceAccount*.json

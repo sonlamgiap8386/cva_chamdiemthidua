@@ -1,11 +1,9 @@
-import { MonthlyScoreRecord, CloudBackup, AppNotification, UserProfile } from '../types';
-import { INITIAL_USERS, INITIAL_MONTHLY_SCORES, INITIAL_BACKUPS, INITIAL_NOTIFICATIONS } from '../data/mockData';
+import { MonthlyScoreRecord, CloudBackup, AppNotification } from '../types';
+import { CURRENT_SCHOOL_YEAR } from '../data/constants';
 
-const SCORES_KEY = 'cva_thidua_scores_v4';
 const BACKUPS_KEY = 'cva_thidua_backups_v2';
 const NOTIFS_KEY = 'cva_thidua_notifs_v1';
 const SETTINGS_KEY = 'cva_thidua_settings_v1';
-const AUTH_USER_KEY = 'cva_auth_user_v1';
 
 export interface AppSettings {
   currentMonth: number;
@@ -18,61 +16,15 @@ export interface AppSettings {
 
 const DEFAULT_SETTINGS: AppSettings = {
   currentMonth: 9,
-  currentYear: '2026-2027',
+  currentYear: CURRENT_SCHOOL_YEAR,
   autoBackupEnabled: true,
   backupIntervalHours: 24,
-  lastBackupAt: '2026-09-03 03:00:15',
+  lastBackupAt: '',
   scoringLocked: false,
 };
 
-export function loadAuthUser(): UserProfile | null {
-  try {
-    const raw = localStorage.getItem(AUTH_USER_KEY);
-    if (raw) {
-      return JSON.parse(raw);
-    }
-  } catch (e) {
-    console.error('Failed to load auth user from storage:', e);
-  }
-  return null;
-}
-
-export function saveAuthUser(user: UserProfile | null): void {
-  try {
-    if (user) {
-      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(AUTH_USER_KEY);
-    }
-  } catch (e) {
-    console.error('Failed to save auth user:', e);
-  }
-}
-
-export function loadScores(): MonthlyScoreRecord[] {
-  try {
-    const raw = localStorage.getItem(SCORES_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length >= 100) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load scores from storage:', e);
-  }
-  // If first time or upgraded to full roster, seed with all staff scores
-  saveScores(INITIAL_MONTHLY_SCORES);
-  return INITIAL_MONTHLY_SCORES;
-}
-
-export function saveScores(scores: MonthlyScoreRecord[]): void {
-  try {
-    localStorage.setItem(SCORES_KEY, JSON.stringify(scores));
-  } catch (e) {
-    console.error('Failed to save scores to storage:', e);
-  }
-}
+/** Số bản sao lưu tối đa giữ trong trình duyệt (localStorage giới hạn ~5 MB). */
+export const MAX_LOCAL_BACKUPS = 5;
 
 export function loadBackups(): CloudBackup[] {
   try {
@@ -81,15 +33,22 @@ export function loadBackups(): CloudBackup[] {
   } catch (e) {
     console.error('Failed to load backups from storage:', e);
   }
-  return INITIAL_BACKUPS;
+  return [];
 }
 
 export function saveBackups(backups: CloudBackup[]): void {
-  try {
-    localStorage.setItem(BACKUPS_KEY, JSON.stringify(backups));
-  } catch (e) {
-    console.error('Failed to save backups:', e);
+  // Mỗi bản sao lưu chứa toàn bộ điểm nên rất nặng: chỉ giữ vài bản mới nhất
+  // và nếu vẫn vượt hạn mức thì bỏ dần bản cũ thay vì im lặng mất dữ liệu.
+  let kept = backups.slice(0, MAX_LOCAL_BACKUPS);
+  while (kept.length > 0) {
+    try {
+      localStorage.setItem(BACKUPS_KEY, JSON.stringify(kept));
+      return;
+    } catch {
+      kept = kept.slice(0, -1);
+    }
   }
+  try { localStorage.removeItem(BACKUPS_KEY); } catch { /* ignore */ }
 }
 
 export function loadNotifications(): AppNotification[] {
@@ -99,7 +58,7 @@ export function loadNotifications(): AppNotification[] {
   } catch (e) {
     console.error('Failed to load notifications:', e);
   }
-  return INITIAL_NOTIFICATIONS;
+  return [];
 }
 
 export function saveNotifications(notifs: AppNotification[]): void {
@@ -147,7 +106,7 @@ export function createCloudSnapshot(
     recordsCount: scores.length,
     staffCount: new Set(scores.map(s => s.staffId)).size,
     isAuto,
-    version: 'v2.4.2',
+    version: 'v2.5.0',
     description,
     // Store an immutable JSON-compatible copy so restore/download uses the
     // state that existed when the snapshot was created, not current state.
@@ -155,4 +114,14 @@ export function createCloudSnapshot(
   };
 
   return backup;
+}
+
+/** Xóa dữ liệu cũ do các phiên bản trước để lại trong trình duyệt (hồ sơ người dùng, điểm mẫu). */
+export function purgeLegacyStorage(): void {
+  try {
+    localStorage.removeItem('cva_auth_user_v1');
+    localStorage.removeItem('cva_thidua_scores_v4');
+  } catch {
+    /* localStorage không khả dụng */
+  }
 }

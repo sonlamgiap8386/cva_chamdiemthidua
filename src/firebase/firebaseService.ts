@@ -8,11 +8,26 @@ import {
   deleteDoc,
   writeBatch,
   onSnapshot,
+  query,
+  where,
   Unsubscribe
 } from 'firebase/firestore';
 import { db } from './config';
-import { UserProfile, MonthlyScoreRecord, Department } from '../types';
-import { SCHOOL_AVATAR } from '../data/staffData';
+import { UserProfile, MonthlyScoreRecord, Department, UserRole } from '../types';
+import { SCHOOL_AVATAR } from '../data/constants';
+import { RANKING_COLLECTION, buildRankingDoc, rankingDocId, rankingDocToRecords } from '../utils/rankings';
+
+/**
+ * Phạm vi dữ liệu mà một tài khoản được phép đọc. PHẢI khớp firestore.rules:
+ * Firestore từ chối cả truy vấn nếu không chứng minh được mọi bản ghi trả về đều được phép,
+ * nên tài khoản không phải BGH bắt buộc truy vấn có điều kiện `where`.
+ */
+export interface DataScope {
+  role: UserRole;
+  staffId: string;
+  departmentId?: string | null;
+  year: string;
+}
 
 export interface FirebaseSyncStatus {
   connected: boolean;
@@ -89,6 +104,7 @@ export async function syncDepartmentsToFirestore(departments: Department[]): Pro
     await batch.commit();
   } catch (err) {
     console.error('Error syncing departments to Firestore:', err);
+    throw err;
   }
 }
 
@@ -106,25 +122,28 @@ export async function fetchDepartmentsFromFirestore(): Promise<Department[]> {
 /**
  * Sync & Fetch Teachers (User Profiles)
  */
+/** Ghi (merge) một nhóm hồ sơ nhân sự, tự chia lô 200 bản ghi. Chỉ dùng cho tài khoản BGH. */
+export async function saveStaffBatchToFirestore(staffList: UserProfile[]): Promise<void> {
+  const chunks = chunkArray(staffList, 200);
+  for (const chunk of chunks) {
+    const batch = writeBatch(db);
+    chunk.forEach(staff => {
+      // Ảnh đại diện là hằng số của giao diện, không lưu vào Firestore.
+      const { avatar: _avatar, ...profile } = staff;
+      batch.set(doc(db, 'users', staff.id), cleanDataForFirestore(profile), { merge: true });
+    });
+    await batch.commit();
+  }
+}
+
 export async function syncStaffListToFirestore(staffList: UserProfile[]): Promise<{ success: boolean; count: number; syncedAt: string }> {
   try {
-    const chunks = chunkArray(staffList, 200);
-    for (const chunk of chunks) {
-      const batch = writeBatch(db);
-      chunk.forEach(staff => {
-        const ref = doc(db, 'users', staff.id);
-        batch.set(ref, cleanDataForFirestore(staff), { merge: true });
-      });
-      await batch.commit();
-    }
+    await saveStaffBatchToFirestore(staffList);
 
-    // Save official synchronization metadata record in Firestore
     const syncedAt = new Date().toISOString();
-    const metaRef = doc(db, 'system_meta', 'staff_sync');
-    await setDoc(metaRef, {
+    await setDoc(doc(db, 'system_meta', 'staff_sync'), {
       lastSyncedAt: syncedAt,
       totalStaff: staffList.length,
-      syncedDatabase: 'ai-studio-hthngthiuacbvctr-df0f8bb6-ece4-4d07-b7f6-2c28924b8b19',
       status: 'officially_stored'
     }, { merge: true });
 
@@ -149,10 +168,16 @@ export async function fetchStaffSyncMetaFromFirestore(): Promise<{ lastSyncedAt:
   }
 }
 
+/** Xóa hồ sơ nhân sự VÀ toàn bộ bản ghi điểm của người đó (tránh điểm mồ côi trên Firestore). */
 export async function deleteStaffFromFirestore(staffId: string): Promise<void> {
   try {
-    const ref = doc(db, 'users', staffId);
-    await deleteDoc(ref);
+    const scoreSnap = await getDocs(query(collection(db, 'scores'), where('staffId', '==', staffId)));
+    for (const chunk of chunkArray(scoreSnap.docs, 400)) {
+      const batch = writeBatch(db);
+      chunk.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+    await deleteDoc(doc(db, 'users', staffId));
   } catch (err) {
     console.error(`Failed to delete staff ${staffId} from Firestore:`, err);
     throw err;
@@ -247,7 +272,8 @@ export async function saveMultipleScoresToFirestore(records: MonthlyScoreRecord[
 export async function saveSingleStaffToFirestore(staff: UserProfile): Promise<void> {
   try {
     const ref = doc(db, 'users', staff.id);
-    await setDoc(ref, cleanDataForFirestore(staff), { merge: true });
+    const { avatar: _avatar, ...profile } = staff;
+    await setDoc(ref, cleanDataForFirestore(profile), { merge: true });
   } catch (err) {
     console.error(`Failed to save staff ${staff.id} to Firestore:`, err);
     throw err;
@@ -255,43 +281,85 @@ export async function saveSingleStaffToFirestore(staff: UserProfile): Promise<vo
 }
 
 /**
- * Real-time subscribers
+ * Real-time subscribers (theo phạm vi quyền)
+ * onSnapshot đã trả dữ liệu ban đầu nên không cần getDocs trước đó (tránh đọc trùng, tốn quota).
  */
+function scoresQuery(scope: DataScope) {
+  const col = collection(db, 'scores');
+  if (scope.role === 'bgh') {
+    return query(col, where('year', '==', scope.year));
+  }
+  if (scope.role === 'ttcm' && scope.departmentId) {
+    return query(col, where('departmentId', '==', scope.departmentId), where('year', '==', scope.year));
+  }
+  return query(col, where('staffId', '==', scope.staffId), where('year', '==', scope.year));
+}
+
 export function subscribeToScores(
+  scope: DataScope,
   onUpdate: (records: MonthlyScoreRecord[]) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
-  const colRef = collection(db, 'scores');
   return onSnapshot(
-    colRef,
-    (snapshot) => {
-      if (!snapshot.empty) {
-        const items = snapshot.docs.map(d => d.data() as MonthlyScoreRecord);
-        onUpdate(items);
-      }
-    },
-    (error) => {
+    scoresQuery(scope),
+    snapshot => onUpdate(snapshot.docs.map(d => d.data() as MonthlyScoreRecord)),
+    error => {
       console.warn('Firestore scores subscription error:', error);
       if (onError) onError(error);
     }
   );
 }
 
+/** BGH đọc toàn bộ hồ sơ; Tổ trưởng chỉ đọc tổ mình. Vai trò khác không có quyền liệt kê. */
+export function canListStaff(scope: DataScope): boolean {
+  return scope.role === 'bgh' || (scope.role === 'ttcm' && !!scope.departmentId);
+}
+
 export function subscribeToStaff(
+  scope: DataScope,
   onUpdate: (staff: UserProfile[]) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
-  const colRef = collection(db, 'users');
+  const col = collection(db, 'users');
+  const q = scope.role === 'bgh' ? col : query(col, where('departmentId', '==', scope.departmentId ?? ''));
   return onSnapshot(
-    colRef,
-    (snapshot) => {
-      if (!snapshot.empty) {
-        const items = snapshot.docs.map(d => ({ ...d.data(), avatar: SCHOOL_AVATAR } as UserProfile));
-        onUpdate(items.sort((a, b) => a.code.localeCompare(b.code)));
-      }
+    q,
+    snapshot => {
+      const items = snapshot.docs.map(d => ({ ...d.data(), avatar: SCHOOL_AVATAR } as UserProfile));
+      onUpdate(items.sort((a, b) => a.code.localeCompare(b.code)));
     },
-    (error) => {
+    error => {
       console.warn('Firestore staff subscription error:', error);
+      if (onError) onError(error);
+    }
+  );
+}
+
+/**
+ * Bảng xếp hạng công khai. BGH công bố lại các tháng bị ảnh hưởng mỗi khi duyệt/khóa/sửa điểm
+ * (chỉ kết quả đã duyệt hoặc khóa sổ mới được công bố, xem src/utils/rankings.ts).
+ */
+export async function publishRankings(records: MonthlyScoreRecord[], year: string, months: readonly number[]): Promise<void> {
+  const uniqueMonths = Array.from(new Set(months));
+  if (uniqueMonths.length === 0) return;
+  const batch = writeBatch(db);
+  uniqueMonths.forEach(month => {
+    batch.set(doc(db, RANKING_COLLECTION, rankingDocId(year, month)), cleanDataForFirestore(buildRankingDoc(records, year, month)));
+  });
+  await batch.commit();
+}
+
+/** Mọi tài khoản đã cấp quyền đều nghe được bảng xếp hạng công khai của năm học (tối đa 9 tài liệu). */
+export function subscribeToRankings(
+  year: string,
+  onUpdate: (records: MonthlyScoreRecord[]) => void,
+  onError?: (err: Error) => void
+): Unsubscribe {
+  return onSnapshot(
+    query(collection(db, RANKING_COLLECTION), where('year', '==', year)),
+    snapshot => onUpdate(snapshot.docs.flatMap(d => rankingDocToRecords(d.data()))),
+    error => {
+      console.warn('Firestore rankings subscription error:', error);
       if (onError) onError(error);
     }
   );

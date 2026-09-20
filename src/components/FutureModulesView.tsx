@@ -10,7 +10,7 @@ import {
   Plus,
   Shield
 } from 'lucide-react';
-import { FUTURE_MODULES } from '../data/mockData';
+import { FUTURE_MODULES } from '../data/futureModules';
 import { FutureModule } from '../types';
 
 export const FutureModulesView: React.FC = () => {

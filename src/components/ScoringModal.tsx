@@ -17,7 +17,7 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { MonthlyScoreRecord, UserProfile, CriterionItem, ScoreItemDetail } from '../types';
-import { CRITERIA_LIST } from '../data/mockData';
+import { CRITERIA_LIST } from '../data/criteria';
 import { formatMonthName, getSemesterName, getSemesterOf } from '../utils/academicYear';
 
 interface ScoringModalProps {
