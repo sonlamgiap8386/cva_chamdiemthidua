@@ -15,6 +15,8 @@ export interface UserProfile {
   homeroomClass?: string; // Lớp chủ nhiệm
   avatar?: string;
   phone?: string;
+  customPassword?: string; // Mật khẩu quản trị viên cấp cho cán bộ
+  passwordUpdatedAt?: string; // Thời điểm cập nhật mật khẩu gần nhất
 }
 
 export interface Department {

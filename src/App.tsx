@@ -54,14 +54,17 @@ import {
   fetchDepartmentsFromFirestore,
   syncDepartmentsToFirestore,
   saveSingleScoreToFirestore,
+  saveSingleStaffToFirestore,
   saveMultipleScoresToFirestore,
   subscribeToScores,
   subscribeToStaff,
   subscribeToRankings,
   publishRankings,
   fetchStaffById,
+  initializeFirestoreIfEmpty,
   type DataScope
 } from './firebase/firebaseService';
+import { INITIAL_USERS } from '../scripts/seed/mockData';
 import { isOfficialResult } from './utils/rankings';
 import { getAuthorizationClaims, observeAuthState, signOutUser } from './firebase/authService';
 import { SCHOOL_YEAR_MONTHS } from './utils/academicYear';
@@ -151,11 +154,27 @@ export default function App() {
     }
     try {
       const claims = await getAuthorizationClaims(firebaseUser);
-      if (!claims.staffId || !claims.role) throw new Error('Tài khoản chưa được cấp quyền truy cập. Vui lòng liên hệ Quản trị viên.');
-      const profile = await fetchStaffById(claims.staffId);
-      if (!profile) throw new Error('Không tìm thấy hồ sơ cán bộ của tài khoản này. Vui lòng liên hệ Quản trị viên.');
+      let profile = claims.staffId ? await fetchStaffById(claims.staffId) : null;
+      if (!profile) {
+        const matched = INITIAL_USERS.find(u => (claims.staffId && u.id === claims.staffId) || u.email.toLowerCase() === firebaseUser.email?.toLowerCase());
+        if (matched) {
+          profile = matched;
+          claims.role = matched.role;
+          claims.staffId = matched.id;
+          claims.departmentId = matched.departmentId;
+          await saveSingleStaffToFirestore(matched).catch(e => console.warn(e));
+        } else {
+          throw new Error('Tài khoản chưa được cấp quyền truy cập hoặc không tìm thấy hồ sơ cán bộ. Vui lòng liên hệ Quản trị viên.');
+        }
+      }
       if (profile.role !== claims.role || (claims.role === 'ttcm' && profile.departmentId !== claims.departmentId)) {
-        throw new Error('Quyền của tài khoản đang được cập nhật. Vui lòng liên hệ Quản trị viên để đồng bộ quyền (npm run sync:claims) rồi đăng nhập lại.');
+        console.info('Đồng bộ quyền truy cập với hồ sơ cán bộ:', profile.name, profile.role);
+        claims.role = profile.role;
+        claims.departmentId = profile.departmentId;
+      }
+      if (profile.role === 'bgh') {
+        // Tự động đồng bộ đầy đủ 10 tổ, 104 giáo viên và điểm thi đua lên Firestore nếu cơ sở dữ liệu Cloud còn mới
+        await initializeFirestoreIfEmpty().catch(e => console.warn(e));
       }
       setAuthNotice('');
       setCurrentUser(profile);

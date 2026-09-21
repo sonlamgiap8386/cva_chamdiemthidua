@@ -171,6 +171,20 @@ function getPositionLabel(roleCode: string, subject: string): string {
 // Leadership & Management Staff
 export const LEADERSHIP_USERS: UserProfile[] = [
   {
+    id: 'user-bgh-giap-van-khiem',
+    name: 'Giáp Văn Khiêm',
+    code: 'BGH00',
+    email: 'sonlamgiap@gmail.com',
+    role: 'bgh',
+    departmentId: 'bgh',
+    departmentName: 'Ban Giám Hiệu',
+    position: 'Ban Giám Hiệu - Quản trị viên',
+    subject: 'Quản lý',
+    concurrentJob: 'Quản trị viên Hệ thống Thi đua',
+    avatar: SCHOOL_AVATAR,
+    phone: '0988 888 888'
+  },
+  {
     id: 'user-bgh-1',
     name: 'Trần Văn Thi',
     code: 'BGH01',

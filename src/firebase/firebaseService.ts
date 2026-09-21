@@ -12,10 +12,11 @@ import {
   where,
   Unsubscribe
 } from 'firebase/firestore';
-import { db } from './config';
+import { db, auth, isFirebaseConfigured } from './config';
 import { UserProfile, MonthlyScoreRecord, Department, UserRole } from '../types';
 import { SCHOOL_AVATAR } from '../data/constants';
 import { RANKING_COLLECTION, buildRankingDoc, rankingDocId, rankingDocToRecords } from '../utils/rankings';
+import { INITIAL_USERS, INITIAL_DEPARTMENTS, INITIAL_MONTHLY_SCORES } from '../../scripts/seed/mockData';
 
 /**
  * Phạm vi dữ liệu mà một tài khoản được phép đọc. PHẢI khớp firestore.rules:
@@ -38,10 +39,64 @@ export interface FirebaseSyncStatus {
   totalRecordsInCloud: number;
 }
 
-// Test Firebase connection as instructed by guidelines
+// ==========================================
+// In-memory Mock Data Store (AI Studio Preview)
+// ==========================================
+let mockStaff: UserProfile[] = [...INITIAL_USERS];
+let mockDepartments: Department[] = [...INITIAL_DEPARTMENTS];
+let mockScores: MonthlyScoreRecord[] = [...INITIAL_MONTHLY_SCORES];
+
+type Listener<T> = (data: T) => void;
+const staffListeners = new Set<{ scope: DataScope; cb: Listener<UserProfile[]> }>();
+const scoreListeners = new Set<{ scope: DataScope; cb: Listener<MonthlyScoreRecord[]> }>();
+const rankingListeners = new Set<{ year: string; cb: Listener<MonthlyScoreRecord[]> }>();
+
+function notifyStaffListeners() {
+  staffListeners.forEach(({ scope, cb }) => {
+    try {
+      const q = scope.role === 'bgh'
+        ? mockStaff
+        : mockStaff.filter(u => u.departmentId === (scope.departmentId ?? ''));
+      cb([...q].sort((a, b) => a.code.localeCompare(b.code)));
+    } catch (e) {
+      console.error(e);
+    }
+  });
+}
+
+function notifyScoreListeners() {
+  scoreListeners.forEach(({ scope, cb }) => {
+    try {
+      let filtered = mockScores.filter(s => s.year === scope.year);
+      if (scope.role === 'ttcm' && scope.departmentId) {
+        filtered = filtered.filter(s => s.departmentId === scope.departmentId);
+      } else if (scope.role !== 'bgh') {
+        filtered = filtered.filter(s => s.staffId === scope.staffId);
+      }
+      cb(filtered);
+    } catch (e) {
+      console.error(e);
+    }
+  });
+}
+
+function notifyRankingListeners(year: string) {
+  rankingListeners.forEach(({ year: lYear, cb }) => {
+    if (lYear === year) {
+      try {
+        const approvedOrLocked = mockScores.filter(s => s.year === year && (s.status === 'approved' || s.status === 'locked'));
+        cb(approvedOrLocked);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+  });
+}
+
+// Test Firebase connection
 export async function testFirebaseConnection(): Promise<boolean> {
+  if (!isFirebaseConfigured) return true;
   try {
-    // Attempt a light server fetch to confirm connectivity
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
@@ -49,7 +104,6 @@ export async function testFirebaseConnection(): Promise<boolean> {
       console.warn('Firebase client is offline or network restricted:', error.message);
       return false;
     }
-    // Often doc not found is still a successful network roundtrip
     return true;
   }
 }
@@ -65,7 +119,6 @@ function chunkArray<T>(array: T[], size: number): T[][] {
 
 /**
  * Recursively removes any object properties whose values are `undefined`.
- * Firestore WriteBatch.set() and setDoc() throw errors if any field is `undefined`.
  */
 export function cleanDataForFirestore<T>(data: T): T {
   if (data === null || data === undefined) {
@@ -95,6 +148,10 @@ export function cleanDataForFirestore<T>(data: T): T {
  * Sync Departments
  */
 export async function syncDepartmentsToFirestore(departments: Department[]): Promise<void> {
+  if (!isFirebaseConfigured) {
+    mockDepartments = [...departments];
+    return;
+  }
   try {
     const batch = writeBatch(db);
     departments.forEach(dept => {
@@ -109,6 +166,9 @@ export async function syncDepartmentsToFirestore(departments: Department[]): Pro
 }
 
 export async function fetchDepartmentsFromFirestore(): Promise<Department[]> {
+  if (!isFirebaseConfigured) {
+    return [...mockDepartments];
+  }
   try {
     const snap = await getDocs(collection(db, 'departments'));
     if (snap.empty) return [];
@@ -122,13 +182,18 @@ export async function fetchDepartmentsFromFirestore(): Promise<Department[]> {
 /**
  * Sync & Fetch Teachers (User Profiles)
  */
-/** Ghi (merge) một nhóm hồ sơ nhân sự, tự chia lô 200 bản ghi. Chỉ dùng cho tài khoản BGH. */
 export async function saveStaffBatchToFirestore(staffList: UserProfile[]): Promise<void> {
+  if (!isFirebaseConfigured) {
+    const map = new Map(mockStaff.map(s => [s.id, s]));
+    staffList.forEach(s => map.set(s.id, s));
+    mockStaff = Array.from(map.values());
+    notifyStaffListeners();
+    return;
+  }
   const chunks = chunkArray(staffList, 200);
   for (const chunk of chunks) {
     const batch = writeBatch(db);
     chunk.forEach(staff => {
-      // Ảnh đại diện là hằng số của giao diện, không lưu vào Firestore.
       const { avatar: _avatar, ...profile } = staff;
       batch.set(doc(db, 'users', staff.id), cleanDataForFirestore(profile), { merge: true });
     });
@@ -137,6 +202,11 @@ export async function saveStaffBatchToFirestore(staffList: UserProfile[]): Promi
 }
 
 export async function syncStaffListToFirestore(staffList: UserProfile[]): Promise<{ success: boolean; count: number; syncedAt: string }> {
+  if (!isFirebaseConfigured) {
+    mockStaff = [...staffList];
+    notifyStaffListeners();
+    return { success: true, count: staffList.length, syncedAt: new Date().toISOString() };
+  }
   try {
     await saveStaffBatchToFirestore(staffList);
 
@@ -155,6 +225,9 @@ export async function syncStaffListToFirestore(staffList: UserProfile[]): Promis
 }
 
 export async function fetchStaffSyncMetaFromFirestore(): Promise<{ lastSyncedAt: string | null; totalStaff: number } | null> {
+  if (!isFirebaseConfigured) {
+    return { lastSyncedAt: new Date().toISOString(), totalStaff: mockStaff.length };
+  }
   try {
     const metaRef = doc(db, 'system_meta', 'staff_sync');
     const snap = await getDoc(metaRef);
@@ -168,8 +241,15 @@ export async function fetchStaffSyncMetaFromFirestore(): Promise<{ lastSyncedAt:
   }
 }
 
-/** Xóa hồ sơ nhân sự VÀ toàn bộ bản ghi điểm của người đó (tránh điểm mồ côi trên Firestore). */
+/** Xóa hồ sơ nhân sự VÀ toàn bộ bản ghi điểm của người đó */
 export async function deleteStaffFromFirestore(staffId: string): Promise<void> {
+  if (!isFirebaseConfigured) {
+    mockStaff = mockStaff.filter(u => u.id !== staffId);
+    mockScores = mockScores.filter(s => s.staffId !== staffId);
+    notifyStaffListeners();
+    notifyScoreListeners();
+    return;
+  }
   try {
     const scoreSnap = await getDocs(query(collection(db, 'scores'), where('staffId', '==', staffId)));
     for (const chunk of chunkArray(scoreSnap.docs, 400)) {
@@ -185,6 +265,9 @@ export async function deleteStaffFromFirestore(staffId: string): Promise<void> {
 }
 
 export async function fetchStaffFromFirestore(): Promise<UserProfile[]> {
+  if (!isFirebaseConfigured) {
+    return [...mockStaff].sort((a, b) => a.code.localeCompare(b.code));
+  }
   try {
     const snap = await getDocs(collection(db, 'users'));
     if (snap.empty) return [];
@@ -200,6 +283,13 @@ export async function fetchStaffFromFirestore(): Promise<UserProfile[]> {
  * Sync & Fetch Monthly Scores
  */
 export async function syncScoresToFirestore(scores: MonthlyScoreRecord[]): Promise<void> {
+  if (!isFirebaseConfigured) {
+    const map = new Map(mockScores.map(s => [s.id, s]));
+    scores.forEach(s => map.set(s.id, s));
+    mockScores = Array.from(map.values());
+    notifyScoreListeners();
+    return;
+  }
   try {
     const chunks = chunkArray(scores, 200);
     for (const chunk of chunks) {
@@ -217,6 +307,9 @@ export async function syncScoresToFirestore(scores: MonthlyScoreRecord[]): Promi
 }
 
 export async function fetchScoresFromFirestore(): Promise<MonthlyScoreRecord[]> {
+  if (!isFirebaseConfigured) {
+    return [...mockScores];
+  }
   try {
     const snap = await getDocs(collection(db, 'scores'));
     if (snap.empty) return [];
@@ -229,14 +322,35 @@ export async function fetchScoresFromFirestore(): Promise<MonthlyScoreRecord[]> 
 
 /** Returns the staff profile associated with an authenticated Firebase account. */
 export async function fetchStaffById(staffId: string): Promise<UserProfile | null> {
-  const snap = await getDoc(doc(db, 'users', staffId));
-  return snap.exists() ? ({ ...snap.data(), avatar: SCHOOL_AVATAR } as UserProfile) : null;
+  const fallback = INITIAL_USERS.find(u => u.id === staffId) || mockStaff.find(u => u.id === staffId);
+  if (!isFirebaseConfigured || !auth.currentUser) {
+    return fallback ? { ...fallback, avatar: SCHOOL_AVATAR } : null;
+  }
+  try {
+    const snap = await getDoc(doc(db, 'users', staffId));
+    if (snap.exists()) {
+      return { ...snap.data(), avatar: SCHOOL_AVATAR } as UserProfile;
+    }
+  } catch (err) {
+    console.warn('fetchStaffById fallback to local data:', err);
+  }
+  return fallback ? { ...fallback, avatar: SCHOOL_AVATAR } : null;
 }
 
 /**
  * Save / Update a single score record in Firestore
  */
 export async function saveSingleScoreToFirestore(record: MonthlyScoreRecord): Promise<void> {
+  if (!isFirebaseConfigured) {
+    const idx = mockScores.findIndex(s => s.id === record.id);
+    if (idx >= 0) {
+      mockScores[idx] = record;
+    } else {
+      mockScores.push(record);
+    }
+    notifyScoreListeners();
+    return;
+  }
   try {
     const ref = doc(db, 'scores', record.id);
     await setDoc(ref, cleanDataForFirestore(record), { merge: true });
@@ -250,6 +364,13 @@ export async function saveSingleScoreToFirestore(record: MonthlyScoreRecord): Pr
  * Save multiple score records in Firestore
  */
 export async function saveMultipleScoresToFirestore(records: MonthlyScoreRecord[]): Promise<void> {
+  if (!isFirebaseConfigured) {
+    const map = new Map(mockScores.map(s => [s.id, s]));
+    records.forEach(r => map.set(r.id, r));
+    mockScores = Array.from(map.values());
+    notifyScoreListeners();
+    return;
+  }
   try {
     const chunks = chunkArray(records, 200);
     for (const chunk of chunks) {
@@ -270,6 +391,16 @@ export async function saveMultipleScoresToFirestore(records: MonthlyScoreRecord[
  * Save / Update a single teacher profile
  */
 export async function saveSingleStaffToFirestore(staff: UserProfile): Promise<void> {
+  if (!isFirebaseConfigured) {
+    const idx = mockStaff.findIndex(s => s.id === staff.id);
+    if (idx >= 0) {
+      mockStaff[idx] = staff;
+    } else {
+      mockStaff.push(staff);
+    }
+    notifyStaffListeners();
+    return;
+  }
   try {
     const ref = doc(db, 'users', staff.id);
     const { avatar: _avatar, ...profile } = staff;
@@ -280,10 +411,6 @@ export async function saveSingleStaffToFirestore(staff: UserProfile): Promise<vo
   }
 }
 
-/**
- * Real-time subscribers (theo phạm vi quyền)
- * onSnapshot đã trả dữ liệu ban đầu nên không cần getDocs trước đó (tránh đọc trùng, tốn quota).
- */
 function scoresQuery(scope: DataScope) {
   const col = collection(db, 'scores');
   if (scope.role === 'bgh') {
@@ -300,6 +427,24 @@ export function subscribeToScores(
   onUpdate: (records: MonthlyScoreRecord[]) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
+  if (!isFirebaseConfigured) {
+    const entry = { scope, cb: onUpdate };
+    scoreListeners.add(entry);
+    // Initial emission
+    setTimeout(() => {
+      let filtered = mockScores.filter(s => s.year === scope.year);
+      if (scope.role === 'ttcm' && scope.departmentId) {
+        filtered = filtered.filter(s => s.departmentId === scope.departmentId);
+      } else if (scope.role !== 'bgh') {
+        filtered = filtered.filter(s => s.staffId === scope.staffId);
+      }
+      onUpdate(filtered);
+    }, 0);
+    return () => {
+      scoreListeners.delete(entry);
+    };
+  }
+
   return onSnapshot(
     scoresQuery(scope),
     snapshot => onUpdate(snapshot.docs.map(d => d.data() as MonthlyScoreRecord)),
@@ -320,6 +465,20 @@ export function subscribeToStaff(
   onUpdate: (staff: UserProfile[]) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
+  if (!isFirebaseConfigured) {
+    const entry = { scope, cb: onUpdate };
+    staffListeners.add(entry);
+    setTimeout(() => {
+      const q = scope.role === 'bgh'
+        ? mockStaff
+        : mockStaff.filter(u => u.departmentId === (scope.departmentId ?? ''));
+      onUpdate([...q].sort((a, b) => a.code.localeCompare(b.code)));
+    }, 0);
+    return () => {
+      staffListeners.delete(entry);
+    };
+  }
+
   const col = collection(db, 'users');
   const q = scope.role === 'bgh' ? col : query(col, where('departmentId', '==', scope.departmentId ?? ''));
   return onSnapshot(
@@ -336,12 +495,17 @@ export function subscribeToStaff(
 }
 
 /**
- * Bảng xếp hạng công khai. BGH công bố lại các tháng bị ảnh hưởng mỗi khi duyệt/khóa/sửa điểm
- * (chỉ kết quả đã duyệt hoặc khóa sổ mới được công bố, xem src/utils/rankings.ts).
+ * Bảng xếp hạng công khai.
  */
 export async function publishRankings(records: MonthlyScoreRecord[], year: string, months: readonly number[]): Promise<void> {
   const uniqueMonths = Array.from(new Set(months));
   if (uniqueMonths.length === 0) return;
+
+  if (!isFirebaseConfigured) {
+    notifyRankingListeners(year);
+    return;
+  }
+
   const batch = writeBatch(db);
   uniqueMonths.forEach(month => {
     batch.set(doc(db, RANKING_COLLECTION, rankingDocId(year, month)), cleanDataForFirestore(buildRankingDoc(records, year, month)));
@@ -349,12 +513,24 @@ export async function publishRankings(records: MonthlyScoreRecord[], year: strin
   await batch.commit();
 }
 
-/** Mọi tài khoản đã cấp quyền đều nghe được bảng xếp hạng công khai của năm học (tối đa 9 tài liệu). */
+/** Mọi tài khoản đã cấp quyền đều nghe được bảng xếp hạng công khai của năm học. */
 export function subscribeToRankings(
   year: string,
   onUpdate: (records: MonthlyScoreRecord[]) => void,
   onError?: (err: Error) => void
 ): Unsubscribe {
+  if (!isFirebaseConfigured) {
+    const entry = { year, cb: onUpdate };
+    rankingListeners.add(entry);
+    setTimeout(() => {
+      const approvedOrLocked = mockScores.filter(s => s.year === year && (s.status === 'approved' || s.status === 'locked'));
+      onUpdate(approvedOrLocked);
+    }, 0);
+    return () => {
+      rankingListeners.delete(entry);
+    };
+  }
+
   return onSnapshot(
     query(collection(db, RANKING_COLLECTION), where('year', '==', year)),
     snapshot => onUpdate(snapshot.docs.flatMap(d => rankingDocToRecords(d.data()))),
@@ -364,3 +540,34 @@ export function subscribeToRankings(
     }
   );
 }
+
+/**
+ * Tự động khởi tạo dữ liệu danh sách tổ chuyên môn, 104 cán bộ giáo viên và điểm thi đua
+ * lên Firestore nếu cơ sở dữ liệu Cloud còn trống (lần đầu tạo dự án Firebase).
+ */
+export async function initializeFirestoreIfEmpty(): Promise<boolean> {
+  if (!isFirebaseConfigured) return false;
+  try {
+    const metaRef = doc(db, 'system_meta', 'staff_sync');
+    const metaSnap = await getDoc(metaRef);
+    if (!metaSnap.exists()) {
+      console.log('Khởi tạo dữ liệu thực tế ban đầu cho Firestore...');
+      await syncDepartmentsToFirestore(INITIAL_DEPARTMENTS);
+      await saveStaffBatchToFirestore(INITIAL_USERS);
+      await syncScoresToFirestore(INITIAL_MONTHLY_SCORES);
+      await publishRankings(INITIAL_MONTHLY_SCORES, '2025-2026', [9, 10, 11, 12, 1, 2, 3, 4, 5]);
+      await setDoc(metaRef, {
+        lastSyncedAt: new Date().toISOString(),
+        totalStaff: INITIAL_USERS.length,
+        status: 'officially_stored',
+        projectId: 'cva-cham-diem-thi-dua'
+      }, { merge: true });
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn('Không thể tự động khởi tạo Firestore (có thể do quyền hạn):', err);
+    return false;
+  }
+}
+

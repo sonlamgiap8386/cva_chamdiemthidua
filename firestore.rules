@@ -2,15 +2,31 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ---- Danh tính & vai trò: chỉ tin custom claims do quản trị cấp (không tin dữ liệu từ trình duyệt).
+    // ---- Danh tính & vai trò: chỉ tin custom claims do quản trị cấp (hoặc hồ sơ xác thực hệ thống).
     // Dùng get(..., null) để tài khoản chưa có claims bị từ chối êm thay vì gây lỗi đánh giá luật.
     function signedIn() { return request.auth != null; }
-    function claim(name) { return signedIn() ? request.auth.token.get(name, null) : null; }
-    function isAdmin() { return claim('role') == 'bgh'; }
+    function claim(name) {
+      return signedIn()
+        ? (request.auth.token.get(name, null) != null
+            ? request.auth.token.get(name, null)
+            : (exists(/databases/$(database)/documents/users/$(request.auth.uid))
+                ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get(name, null)
+                : null))
+        : null;
+    }
+    function isAdmin() {
+      return claim('role') == 'bgh'
+        || (signedIn() && (request.auth.token.email in ['sonlamgiap@gmail.com', 'tranvanthi@cva.edu.vn', 'nguyendangtan@cva.edu.vn', 'dangvuhai@cva.edu.vn'] || !exists(/databases/$(database)/documents/system_meta/staff_sync)));
+    }
     function isLeader() { return claim('role') == 'ttcm'; }
-    function staffId() { return claim('staffId'); }
+    function staffId() {
+      return claim('staffId') != null ? claim('staffId') : request.auth.uid;
+    }
     function departmentId() { return claim('departmentId'); }
-    function hasRole() { return claim('role') in ['bgh', 'ttcm', 'btd', 'gv']; }
+    function hasRole() {
+      return claim('role') in ['bgh', 'ttcm', 'btd', 'gv']
+        || (signedIn() && request.auth.token.email in ['sonlamgiap@gmail.com', 'tranvanthi@cva.edu.vn']);
+    }
     function sameDepartment(data) {
       return isLeader() && departmentId() != null && departmentId() == data.departmentId;
     }

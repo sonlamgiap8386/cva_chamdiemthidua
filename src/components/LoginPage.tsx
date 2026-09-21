@@ -6,21 +6,65 @@ import {
   ArrowRight,
   AlertCircle,
   Eye,
-  EyeOff
+  EyeOff,
+  ExternalLink
 } from 'lucide-react';
-import { signIn, requestPasswordReset } from '../firebase/authService';
+import { signIn, requestPasswordReset, signInWithGoogle } from '../firebase/authService';
 
 interface LoginPageProps {
   /** Lý do phiên đăng nhập bị từ chối sau khi xác thực (thiếu quyền, hồ sơ không khớp...). */
   notice?: string;
 }
 
-function describeLoginError(err: unknown): string {
+function describeLoginError(err: unknown): { message: string; isOperationNotAllowed: boolean } {
   const code = (err as { code?: string })?.code ?? '';
-  if (code === 'auth/too-many-requests') return 'Đăng nhập sai quá nhiều lần. Vui lòng đợi vài phút rồi thử lại, hoặc dùng "Quên mật khẩu".';
-  if (code === 'auth/network-request-failed') return 'Không kết nối được máy chủ. Vui lòng kiểm tra mạng.';
-  if (code === 'auth/user-disabled') return 'Tài khoản đã bị vô hiệu hóa. Vui lòng liên hệ Quản trị viên.';
-  return 'Email hoặc mật khẩu không chính xác. Nếu quên mật khẩu, hãy dùng "Quên mật khẩu" hoặc liên hệ Quản trị viên.';
+  const messageStr = (err as Error)?.message || '';
+  if (code === 'auth/operation-not-allowed' || messageStr.includes('operation-not-allowed') || messageStr.includes('PASSWORD_LOGIN_DISABLED')) {
+    return {
+      message: 'Phương thức "Email/Mật khẩu" hoặc Web API Key chưa khớp với dự án cva-cham-diem-thi-dua trên Firebase.',
+      isOperationNotAllowed: true,
+    };
+  }
+  if (code === 'auth/wrong-password' || code === 'auth/invalid-credential' || code === 'auth/invalid-login-credentials') {
+    return {
+      message: 'Email hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại.',
+      isOperationNotAllowed: false,
+    };
+  }
+  if (code === 'auth/user-not-found') {
+    return {
+      message: 'Không tìm thấy tài khoản với email này trên Firebase. Vui lòng liên hệ Quản trị viên.',
+      isOperationNotAllowed: false,
+    };
+  }
+  if (code === 'auth/invalid-email') {
+    return {
+      message: 'Định dạng email không hợp lệ. Vui lòng nhập đúng email @cva.edu.vn.',
+      isOperationNotAllowed: false,
+    };
+  }
+  if (code === 'auth/too-many-requests') {
+    return {
+      message: 'Đăng nhập sai quá nhiều lần. Vui lòng đợi vài phút rồi thử lại, hoặc dùng "Quên mật khẩu".',
+      isOperationNotAllowed: false,
+    };
+  }
+  if (code === 'auth/network-request-failed') {
+    return {
+      message: 'Không kết nối được máy chủ Firebase. Vui lòng kiểm tra kết nối mạng.',
+      isOperationNotAllowed: false,
+    };
+  }
+  if (code === 'auth/user-disabled') {
+    return {
+      message: 'Tài khoản đã bị vô hiệu hóa trên Firebase. Vui lòng liên hệ Quản trị viên.',
+      isOperationNotAllowed: false,
+    };
+  }
+  return {
+    message: (err as Error)?.message || 'Email hoặc mật khẩu không chính xác.',
+    isOperationNotAllowed: false,
+  };
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({ notice }) => {
@@ -29,41 +73,66 @@ export const LoginPage: React.FC<LoginPageProps> = ({ notice }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [infoMsg, setInfoMsg] = useState('');
+  const [isOperationNotAllowed, setIsOperationNotAllowed] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
+    setIsOperationNotAllowed(false);
+    setLoading(true);
 
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) {
       setErrorMsg('Vui lòng nhập email công vụ.');
+      setLoading(false);
       return;
     }
     try {
       await signIn(normalizedEmail, password);
     } catch (err) {
-      setErrorMsg(describeLoginError(err));
+      const desc = describeLoginError(err);
+      setErrorMsg(desc.message);
+      if (desc.isOperationNotAllowed) {
+        setIsOperationNotAllowed(true);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setErrorMsg('');
+    setIsOperationNotAllowed(false);
+    setLoading(true);
+    try {
+      await signInWithGoogle();
+    } catch (err: any) {
+      if (err?.code === 'auth/popup-closed-by-user') {
+        setErrorMsg('Đã hủy đăng nhập Google.');
+      } else {
+        const desc = describeLoginError(err);
+        setErrorMsg(desc.message);
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleForgotPassword = async () => {
     setErrorMsg('');
+    setIsOperationNotAllowed(false);
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) {
-      setErrorMsg('Nhập email công vụ vào ô Email rồi bấm "Quên mật khẩu".');
+      setErrorMsg('Vui lòng nhập email công vụ ở trên để nhận hướng dẫn đặt lại mật khẩu.');
       return;
     }
     try {
       await requestPasswordReset(normalizedEmail);
+      setInfoMsg(`Đã gửi liên kết đặt lại mật khẩu tới ${normalizedEmail}. Vui lòng kiểm tra hộp thư đến (hoặc thư rác).`);
     } catch (err) {
-      const code = (err as { code?: string })?.code ?? '';
-      if (code === 'auth/network-request-failed' || code === 'auth/too-many-requests') {
-        setErrorMsg(describeLoginError(err));
-        return;
-      }
+      setErrorMsg(describeLoginError(err).message);
     }
-    // Luôn báo giống nhau để không lộ email nào có tài khoản.
-    setInfoMsg('Nếu email tồn tại trong hệ thống, hướng dẫn đặt lại mật khẩu đã được gửi. Hãy kiểm tra hộp thư (cả mục Spam).');
   };
 
   return (
@@ -126,9 +195,29 @@ export const LoginPage: React.FC<LoginPageProps> = ({ notice }) => {
             </div>
 
             {(errorMsg || notice) && (
-              <div role="alert" className="mb-4 p-3 rounded-xl bg-[#3b0d18] border border-[#7a1830] text-rose-200 flex items-center gap-2 text-xs font-semibold">
-                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-                <span>{errorMsg || notice}</span>
+              <div role="alert" className="mb-4 p-3.5 rounded-xl bg-[#3b0d18] border border-[#7a1830] text-rose-200 text-xs font-semibold space-y-2">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+                  <span>{errorMsg || notice}</span>
+                </div>
+                {isOperationNotAllowed && (
+                  <div className="mt-2 pt-2 border-t border-rose-800/60 text-[11px] text-rose-300 font-normal space-y-2">
+                    <p>
+                      <strong>Lưu ý:</strong> Vui lòng đảm bảo cấu hình <em>Web API Key</em> khớp với dự án <em>cva-cham-diem-thi-dua</em> và phương thức <strong>Email/Password</strong> đã được bật trên Firebase Console.
+                    </p>
+                    <div className="flex items-center gap-2 pt-1">
+                      <a
+                        href="https://console.firebase.google.com/project/cva-cham-diem-thi-dua/authentication/providers"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-400 text-stone-950 font-bold hover:bg-amber-300 transition-colors"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>Mở Firebase Console</span>
+                      </a>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {infoMsg && !errorMsg && (
@@ -195,13 +284,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({ notice }) => {
 
               <button
                 type="submit"
-                className="w-full py-2.5 px-4 bg-amber-400 hover:bg-amber-500 text-stone-950 font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer"
+                disabled={loading}
+                className="w-full py-2.5 px-4 bg-amber-400 hover:bg-amber-500 disabled:opacity-50 text-stone-950 font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer"
               >
-                <span>Đăng Nhập Vào Hệ Thống</span>
+                <span>{loading ? 'Đang xác thực...' : 'Đăng Nhập Vào Hệ Thống'}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </form>
-
           </div>
 
           <div className="mt-4 pt-3 border-t border-[#0e4438] text-center text-[10px] text-stone-400">
