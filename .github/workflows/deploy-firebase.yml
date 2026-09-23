@@ -45,13 +45,17 @@ jobs:
           VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID || '18946166372' }}
 
       - name: Deploy to Firebase Hosting + Firestore rules
-        if: ${{ secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
-        run: |
-          echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > "${{ runner.temp }}/firebase-service-account.json"
-          PROJECT_ID="${{ secrets.FIREBASE_PROJECT_ID || 'cva-cham-diem-thi-dua' }}"
-          npx firebase-tools deploy --only hosting,firestore:rules --project "$PROJECT_ID" --non-interactive
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-service-account.json
+          SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID || 'cva-cham-diem-thi-dua' }}
+        run: |
+          if [ -n "$SERVICE_ACCOUNT" ]; then
+            echo "$SERVICE_ACCOUNT" > "${{ runner.temp }}/firebase-service-account.json"
+            export GOOGLE_APPLICATION_CREDENTIALS="${{ runner.temp }}/firebase-service-account.json"
+            npx firebase-tools deploy --only hosting,firestore:rules --project "$PROJECT_ID" --non-interactive
+          else
+            echo "FIREBASE_SERVICE_ACCOUNT not configured, skipping Firebase Hosting deploy"
+          fi
 
       - name: Upload artifact for GitHub Pages
         uses: actions/upload-pages-artifact@v3
