@@ -16,7 +16,11 @@ import {
   ImageOff,
   Link2,
   User,
-  Check
+  Check,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Copy
 } from 'lucide-react';
 import { UserProfile, Department } from '../types';
 
@@ -55,6 +59,12 @@ export const StaffEditModal: React.FC<StaffEditModalProps> = ({
   const [avatar, setAvatar] = useState('');
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [avatarUrlText, setAvatarUrlText] = useState('');
+  const [customPassword, setCustomPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [copiedPassword, setCopiedPassword] = useState(false);
+  const [passwordUpdatedAt, setPasswordUpdatedAt] = useState<string | undefined>(undefined);
+  const [passwordSuccessMsg, setPasswordSuccessMsg] = useState('');
+  const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -76,6 +86,8 @@ export const StaffEditModal: React.FC<StaffEditModalProps> = ({
       setEmail(staff.email || '');
       setAvatar(staff.avatar || '');
       setAvatarUrlText(staff.avatar || '');
+      setCustomPassword(staff.customPassword || 'Cva@2026');
+      setPasswordUpdatedAt(staff.passwordUpdatedAt);
     } else {
       // New staff defaults
       setName('');
@@ -91,10 +103,51 @@ export const StaffEditModal: React.FC<StaffEditModalProps> = ({
       setEmail('');
       setAvatar('');
       setAvatarUrlText('');
+      setCustomPassword('Cva@2026');
+      setPasswordUpdatedAt(undefined);
     }
+    setShowPassword(false);
+    setCopiedPassword(false);
     setShowUrlInput(false);
+    setPasswordSuccessMsg('');
     setErrorMsg('');
   }, [staff, departments, existingStaffCount, isOpen]);
+
+  // Xử lý cập nhật mật khẩu riêng ngay lập tức lên Firebase Firestore
+  const handleQuickUpdatePassword = async () => {
+    if (!staff) {
+      setErrorMsg('Vui lòng lưu hồ sơ cán bộ mới trước khi cập nhật mật khẩu riêng.');
+      return;
+    }
+    if (!customPassword.trim()) {
+      setErrorMsg('Mật khẩu không được để trống.');
+      return;
+    }
+    if (customPassword.trim().length < 6) {
+      setErrorMsg('Mật khẩu cần tối thiểu 6 ký tự để đảm bảo an toàn.');
+      return;
+    }
+
+    setIsUpdatingPassword(true);
+    setPasswordSuccessMsg('');
+    setErrorMsg('');
+    try {
+      const nowIso = new Date().toISOString();
+      const updatedStaff: UserProfile = {
+        ...staff,
+        customPassword: customPassword.trim(),
+        passwordUpdatedAt: nowIso
+      };
+      await onSave(updatedStaff);
+      setPasswordUpdatedAt(nowIso);
+      setPasswordSuccessMsg(`Đã cập nhật mật khẩu thành công cho ${staff.name}!`);
+      setTimeout(() => setPasswordSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Lỗi khi cập nhật mật khẩu lên Firebase');
+    } finally {
+      setIsUpdatingPassword(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -184,6 +237,11 @@ export const StaffEditModal: React.FC<StaffEditModalProps> = ({
 
     if (isHomeroom && homeroomClass.trim()) {
       cleanStaff.homeroomClass = homeroomClass.trim();
+    }
+
+    if (customPassword.trim()) {
+      cleanStaff.customPassword = customPassword.trim();
+      cleanStaff.passwordUpdatedAt = new Date().toISOString();
     }
 
     setIsSaving(true);
@@ -528,6 +586,100 @@ export const StaffEditModal: React.FC<StaffEditModalProps> = ({
                 placeholder="VD: gv001@thpt.edu.vn"
                 className="w-full bg-[#041d17] border border-[#104b3e] rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-400"
               />
+            </div>
+          </div>
+
+          {/* Quản trị Mật khẩu Đăng nhập của Cán bộ */}
+          <div className="p-3.5 bg-[#031813] rounded-xl border border-amber-500/40 space-y-2.5 shadow-inner">
+            <div className="flex items-center justify-between">
+              <label className="flex items-center gap-1.5 font-bold text-amber-300 text-sm">
+                <KeyRound className="w-4 h-4 text-amber-400" />
+                <span>Mật khẩu Đăng nhập của Cán bộ</span>
+              </label>
+              {passwordUpdatedAt && (
+                <span className="text-[10px] text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-800/60 font-medium">
+                  Đã đổi: {new Date(passwordUpdatedAt).toLocaleDateString('vi-VN')}
+                </span>
+              )}
+            </div>
+
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                value={customPassword}
+                onChange={e => setCustomPassword(e.target.value)}
+                placeholder="Nhập mật khẩu cấp cho cán bộ..."
+                className="w-full bg-[#041d17] border border-[#104b3e] rounded-xl pl-3 pr-24 py-2 text-white focus:outline-none focus:border-amber-400 font-mono text-sm tracking-wider"
+              />
+              <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="p-1.5 text-emerald-400 hover:text-white rounded-lg hover:bg-emerald-900/50 transition-colors cursor-pointer"
+                  title={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+                {customPassword && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(customPassword);
+                      setCopiedPassword(true);
+                      setTimeout(() => setCopiedPassword(false), 2000);
+                    }}
+                    className="p-1.5 text-amber-400 hover:text-white rounded-lg hover:bg-amber-900/50 transition-colors cursor-pointer"
+                    title="Sao chép mật khẩu"
+                  >
+                    {copiedPassword ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {passwordSuccessMsg && (
+              <div className="p-2.5 rounded-lg bg-emerald-950 border border-emerald-400/60 text-emerald-300 text-xs flex items-center gap-2 animate-in fade-in">
+                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span className="font-semibold">{passwordSuccessMsg}</span>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setCustomPassword('Cva@2026')}
+                className="text-xs px-2.5 py-1 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 transition-colors cursor-pointer"
+              >
+                Đặt chuẩn: Cva@2026
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const randomPass = 'Cva@' + Math.floor(100000 + Math.random() * 900000);
+                  setCustomPassword(randomPass);
+                  setShowPassword(true);
+                }}
+                className="text-xs px-2.5 py-1 rounded-lg bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-800 transition-colors cursor-pointer"
+              >
+                Tạo ngẫu nhiên
+              </button>
+
+              {isEditing && (
+                <button
+                  type="button"
+                  onClick={handleQuickUpdatePassword}
+                  disabled={isUpdatingPassword || isSaving}
+                  className="text-xs px-3 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 text-[#031713] font-bold flex items-center gap-1 shadow-sm transition-colors cursor-pointer disabled:opacity-50"
+                  title="Cập nhật riêng mật khẩu ngay lập tức lên Firebase Firestore"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>{isUpdatingPassword ? 'Đang cập nhật...' : 'Cập nhật mật khẩu ngay'}</span>
+                </button>
+              )}
+
+              <span className="text-[11px] text-emerald-400/80 ml-auto">
+                BGH có thể cấp hoặc đổi mật khẩu trực tiếp cho CBVC tại đây.
+              </span>
             </div>
           </div>
 
